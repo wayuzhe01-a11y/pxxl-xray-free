@@ -1,61 +1,30 @@
-// setup.js — build (download) step: fetch the upstream xray binary at build time.
-// Fetches the latest xray release for linux-64 only (Heroku-style stack),
-// extracts the binary, and stores it as ./xray (executable).
-// Keep this file because it is referenced by the "build" script in package.json.
-const fs = require('node:fs');
-const path = require('node:path');
-const https = require('node:https');
-const { execFile } = require('node:child_process');
-const { promisify } = require('node:util');
-const execFileAsync = promisify(execFile);
-
-async function fetchJson(url) {
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+const url = 'https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-64.zip';
+const zip = path.join(__dirname, 'xray.zip');
+const bin = path.join(__dirname, 'web-worker');
+function get(u, file) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'xray-setup' } }, res => {
-      if (res.statusCode !== 200) {
-        reject(new Error(`Failed to fetch ${url}: ${res.statusCode}`));
-        res.resume();
-        return;
+    const f = fs.createWriteStream(file);
+    https.get(u, { headers: { 'User-Agent': 'setup' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        f.close(); try { fs.unlinkSync(file); } catch (e) {}
+        return get(res.headers.location, file).then(resolve, reject);
       }
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve(JSON.parse(data)));
+      if (res.statusCode !== 200) return reject(new Error('HTTP ' + res.statusCode));
+      res.pipe(f); f.on('finish', () => f.close(resolve));
     }).on('error', reject);
   });
 }
-
-async function download(url, dest) {
-  return new Promise((resolve, reject) => {
-    // Use curl if available — fastest path for large binaries.
-    execFile('curl', ['-fL', '-o', dest, url], err => {
-      if (!err) return resolve();
-      https.get(url, res => {
-        if (res.statusCode !== 200) {
-          reject(new Error(`Download failed: ${res.statusCode}`));
-          res.resume();
-          return;
-        }
-        const out = fs.createWriteStream(dest);
-        res.pipe(out);
-        out.on('finish', () => out.close(resolve));
-        out.on('error', reject);
-      }).on('error', reject);
-    });
-  });
-}
-
-async function main() {
-  const release = await fetchJson(
-    'https://api.github.com/repos/XTLS/Xray-core/releases/latest'
-  );
-  const asset = release.assets.find(a => a.name === 'Xray-linux-64.zip');
-  if (!asset) throw new Error('Xray-linux-64.zip asset not found in latest release');
-  const zip = path.join(__dirname, 'xray.zip');
-  await download(asset.browser_download_url, zip);
-  await execFileAsync('unzip', ['-o', zip, 'xray', '-d', __dirname]);
-  fs.chmodSync(path.join(__dirname, 'xray'), 0o755);
-  fs.unlinkSync(zip);
-  console.log('xray binary ready');
-}
-
-main().catch(err => { console.error(err); process.exit(1); });
+(async () => {
+  if (!fs.existsSync(bin) || !fs.existsSync(path.join(__dirname, 'geoip.dat'))) {
+    await get(url, zip);
+    execSync('unzip -o -q xray.zip && mv -f xray web-worker && chmod +x web-worker && rm -f xray.zip LICENSE README.md', { cwd: __dirname, stdio: 'inherit' });
+  }
+  for (const f of ['geoip.dat', 'geosite.dat']) {
+    if (!fs.existsSync(path.join(__dirname, f))) throw new Error('missing ' + f);
+  }
+  console.log('setup ok');
+})().catch((e) => { console.error(e); process.exit(1); });
